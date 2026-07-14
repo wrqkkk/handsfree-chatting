@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>handsfree-chatting</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>handsfree-chatting</h1>
+      <p>把多个 prompt 放进队列，让 ChatGPT 依次发送。</p>
+    </header>
+
+    <label for="queueInput">Prompt 队列</label>
+    <textarea id="queueInput" spellcheck="false" placeholder="第一个 prompt\n\n---PROMPT---\n\n第二个 prompt"></textarea>
+
+    <p class="hint">使用 <code>---PROMPT---</code> 分隔不同 prompt。</p>
+
+    <section class="status-card" aria-live="polite">
+      <div><span>状态</span><strong id="statusText">未开始</strong></div>
+      <div><span>进度</span><strong id="progressText">0 / 0</strong></div>
+      <p id="messageText">请在 ChatGPT 对话页面中打开本扩展。</p>
+    </section>
+
+    <div class="buttons">
+      <button id="startBtn" class="primary">开始</button>
+      <button id="pauseBtn">暂停</button>
+      <button id="resetBtn" class="danger">重置</button>
+    </div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
