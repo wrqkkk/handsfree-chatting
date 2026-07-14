@@ -3,11 +3,20 @@ const DEFAULT_STATE = {
   prompts: [],
   currentIndex: 0,
   inFlightIndex: null,
-  inFlightBeforeCount: 0,
-  inFlightBeforeText: "",
+  currentPrompt: "",
+  currentPromptHash: "",
+  preSendUserCount: 0,
+  preSendAssistantCount: 0,
+  sentAt: 0,
+  lastProgressAt: 0,
+  lastProgressSignature: "",
+  recoveryCount: 0,
   running: false,
+  phase: "idle",
   status: "idle",
-  message: "请在 ChatGPT 对话页面中打开本扩展。"
+  message: "请在 ChatGPT 对话页面中打开本扩展。",
+  boundTabId: null,
+  boundUrl: ""
 };
 
 const queueInput = document.getElementById("queueInput");
@@ -32,6 +41,8 @@ function statusLabel(status) {
     idle: "未开始",
     running: "运行中",
     waiting: "等待回答",
+    recovering: "正在恢复",
+    verifying: "正在验证",
     paused: "已暂停",
     completed: "已完成",
     error: "出现错误"
@@ -47,7 +58,8 @@ function render(state) {
   progressText.textContent = `${current} / ${prompts.length}`;
   messageText.textContent = state.message || "";
 
-  startBtn.textContent = state.running ? "运行中" : current > 0 && current < prompts.length ? "继续" : "开始";
+  const canResume = !state.running && current < prompts.length && (current > 0 || state.inFlightIndex !== null);
+  startBtn.textContent = state.running ? "运行中" : canResume ? "继续" : "开始";
   startBtn.disabled = Boolean(state.running);
   pauseBtn.disabled = !state.running;
 }
@@ -62,7 +74,7 @@ async function setState(patch) {
   render(await getState());
 }
 
-async function getChatGPTTab() {
+async function getActiveChatGPTTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
 
@@ -78,23 +90,36 @@ function isMissingReceiverError(error) {
   return /Receiving end does not exist|Could not establish connection/i.test(errorText);
 }
 
-async function sendToContent(message) {
-  const tab = await getChatGPTTab();
-
+async function sendToTab(tabId, message) {
   try {
-    return await chrome.tabs.sendMessage(tab.id, message);
+    return await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
     if (!isMissingReceiverError(error)) {
       throw error;
     }
 
     await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId },
       files: ["content.js"]
     });
 
-    return chrome.tabs.sendMessage(tab.id, message);
+    return chrome.tabs.sendMessage(tabId, message);
   }
+}
+
+async function resolveControlTab(state) {
+  if (Number.isInteger(state.boundTabId)) {
+    try {
+      const tab = await chrome.tabs.get(state.boundTabId);
+      if (tab?.id && /^https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(tab.url || "")) {
+        return tab;
+      }
+    } catch (_) {
+      // Fall through.
+    }
+  }
+
+  return getActiveChatGPTTab();
 }
 
 async function startQueue() {
@@ -109,18 +134,52 @@ async function startQueue() {
   try {
     const previous = await getState();
     const queueChanged = previous.rawQueue !== rawQueue;
-    const currentIndex = queueChanged ? 0 : Math.min(previous.currentIndex || 0, prompts.length);
+
+    if (queueChanged && previous.inFlightIndex !== null) {
+      throw new Error("当前仍有未确认的 in-flight prompt。为避免重复发送，请先完成或重置当前队列。 ");
+    }
+
+    let targetTab;
+    let currentIndex;
+
+    if (!queueChanged && Number.isInteger(previous.boundTabId) && (previous.currentIndex > 0 || previous.inFlightIndex !== null)) {
+      targetTab = await resolveControlTab(previous);
+      currentIndex = Math.min(previous.currentIndex || 0, prompts.length);
+    } else {
+      targetTab = await getActiveChatGPTTab();
+      currentIndex = queueChanged ? 0 : Math.min(previous.currentIndex || 0, prompts.length);
+    }
+
+    const resetExecutionFields = queueChanged
+      ? {
+          inFlightIndex: null,
+          currentPrompt: "",
+          currentPromptHash: "",
+          preSendUserCount: 0,
+          preSendAssistantCount: 0,
+          sentAt: 0,
+          lastProgressAt: 0,
+          lastProgressSignature: "",
+          recoveryCount: 0,
+          phase: "idle"
+        }
+      : {};
 
     await chrome.storage.local.set({
       rawQueue,
       prompts,
       currentIndex,
       running: true,
-      status: "running",
-      message: "准备发送下一条 prompt。"
+      status: previous.inFlightIndex !== null ? "verifying" : "running",
+      message: previous.inFlightIndex !== null
+        ? "正在恢复并验证当前 prompt。"
+        : "准备发送下一条 prompt。",
+      boundTabId: targetTab.id,
+      boundUrl: targetTab.url || previous.boundUrl || "",
+      ...resetExecutionFields
     });
 
-    const response = await sendToContent({ type: "HFC_START" });
+    const response = await sendToTab(targetTab.id, { type: "HFC_START" });
     if (!response?.ok) {
       throw new Error(response?.error || "无法启动队列。请刷新 ChatGPT 页面后重试。");
     }
@@ -137,12 +196,17 @@ async function startQueue() {
 
 async function pauseQueue() {
   try {
+    const state = await getState();
     await chrome.storage.local.set({
       running: false,
       status: "paused",
+      phase: "paused",
       message: "队列已暂停。正在生成的回答不会被中断。"
     });
-    await sendToContent({ type: "HFC_PAUSE" });
+
+    if (Number.isInteger(state.boundTabId)) {
+      await sendToTab(state.boundTabId, { type: "HFC_PAUSE" });
+    }
   } catch (error) {
     await chrome.storage.local.set({
       running: false,
@@ -155,12 +219,21 @@ async function pauseQueue() {
 }
 
 async function resetQueue() {
+  const currentRaw = queueInput.value;
+  const state = await getState();
+
   try {
-    await chrome.storage.local.set({ ...DEFAULT_STATE, rawQueue: queueInput.value });
-    await sendToContent({ type: "HFC_RESET" });
+    if (Number.isInteger(state.boundTabId)) {
+      await sendToTab(state.boundTabId, { type: "HFC_RESET" });
+    }
   } catch (_) {
-    // 即使当前不在 ChatGPT 页面，也允许本地状态完成重置。
+    // Reset local state even when the page is unavailable.
   }
+
+  await chrome.storage.local.set({
+    ...DEFAULT_STATE,
+    rawQueue: currentRaw
+  });
 
   render(await getState());
 }
