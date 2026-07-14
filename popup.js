@@ -73,9 +73,28 @@ async function getChatGPTTab() {
   return tab;
 }
 
+function isMissingReceiverError(error) {
+  const errorText = String(error?.message || error || "");
+  return /Receiving end does not exist|Could not establish connection/i.test(errorText);
+}
+
 async function sendToContent(message) {
   const tab = await getChatGPTTab();
-  return chrome.tabs.sendMessage(tab.id, message);
+
+  try {
+    return await chrome.tabs.sendMessage(tab.id, message);
+  } catch (error) {
+    if (!isMissingReceiverError(error)) {
+      throw error;
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["content.js"]
+    });
+
+    return chrome.tabs.sendMessage(tab.id, message);
+  }
 }
 
 async function startQueue() {
