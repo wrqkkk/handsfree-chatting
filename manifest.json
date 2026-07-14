@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "handsfree-chatting",
+  "version": "0.1.0",
+  "description": "A minimal prompt queue for ChatGPT in Microsoft Edge.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "action": {
+    "default_title": "handsfree-chatting",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
